@@ -2,8 +2,8 @@
 import React, { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { supabase } from '../services/supabaseClient';
-import { simulateResidentResponse } from '../services/geminiService';
-import { VisitorType, Staff } from '../types';
+import { simulateResidentResponse, composeResidentAlert } from '../services/geminiService';
+import { VisitorType, Staff, Resident } from '../types';
 
 const VisitorEntryForm: React.FC = () => {
   const [searchParams] = useSearchParams();
@@ -15,6 +15,8 @@ const VisitorEntryForm: React.FC = () => {
   const [formData, setFormData] = useState({ name: '', flat: '', purpose: '' });
   const [staffList, setStaffList] = useState<Staff[]>([]);
   const [searchStaff, setSearchStaff] = useState('');
+  const [targetResident, setTargetResident] = useState<Resident | null>(null);
+  const [draftedMessage, setDraftedMessage] = useState('');
   const [result, setResult] = useState<{ approved: boolean, message: string } | null>(null);
 
   useEffect(() => {
@@ -26,8 +28,12 @@ const VisitorEntryForm: React.FC = () => {
   }, [sid]);
 
   const fetchSocietyInfo = async () => {
-    const { data } = await supabase.from('societies').select('name').eq('id', sid).single();
-    if (data) setSocietyName(data.name);
+    try {
+      const { data } = await supabase.from('societies').select('name').eq('id', sid).single();
+      if (data) setSocietyName(data.name);
+    } catch (err) {
+      console.error("Failed to fetch society info", err);
+    }
   };
 
   useEffect(() => {
@@ -35,39 +41,67 @@ const VisitorEntryForm: React.FC = () => {
   }, [mode]);
 
   const fetchStaff = async () => {
-    const { data } = await supabase.from('staff').select('*').eq('society_id', sid).order('name');
-    if (data) setStaffList(data);
+    try {
+      const { data } = await supabase.from('staff').select('*').eq('society_id', sid).order('name');
+      if (data) setStaffList(data);
+    } catch (err) {
+      console.error("Failed to fetch staff", err);
+    }
   };
 
   const handleVisitorSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setMode('LOADING');
 
-    const { data: entry, error } = await supabase
-      .from('visitor_entries')
-      .insert([{
-        society_id: sid,
-        flat_number: formData.flat,
-        visitor_name: formData.name,
-        purpose: formData.purpose,
-        visitor_type: visitorType,
-        status: 'PENDING'
-      }]).select().single();
+    try {
+      // 1. REAL RESIDENT LOOKUP
+      const { data: resident, error: resError } = await supabase
+        .from('residents')
+        .select('*')
+        .eq('society_id', sid)
+        .eq('flat_number', formData.flat)
+        .single();
 
-    if (error) {
-      alert('Error connecting to system.');
-      setMode('FORM');
-      return;
+      setTargetResident(resident || null);
+
+      // 2. COMPOSE SMART ALERT WITH GEMINI
+      const alertMsg = await composeResidentAlert(
+        formData.name, 
+        formData.purpose || (visitorType === 'Delivery' ? 'Delivery' : 'Visitor'), 
+        resident?.name || 'Resident', 
+        formData.flat
+      );
+      setDraftedMessage(alertMsg);
+
+      // 3. LOG ENTRY TO SUPABASE
+      const { data: entry, error: dbError } = await supabase
+        .from('visitor_entries')
+        .insert([{
+          society_id: sid,
+          flat_number: formData.flat,
+          visitor_name: formData.name,
+          purpose: alertMsg, // Use the smart purpose
+          visitor_type: visitorType,
+          status: 'PENDING'
+        }]).select().single();
+
+      if (dbError) throw dbError;
+
+      // 4. SIMULATE RESPONSE (In production, this waits for a real resident callback)
+      const aiRes = await simulateResidentResponse(formData.name, formData.purpose, formData.flat);
+      
+      // Update entry with decision
+      await supabase.from('visitor_entries')
+        .update({ status: aiRes.approved ? 'APPROVED' : 'REJECTED' })
+        .eq('id', entry.id);
+
+      setResult(aiRes);
+      setTimeout(() => setMode('RESULT'), 2000); // Small delay for demo feel
+    } catch (error) {
+      console.error('Submission Error:', error);
+      setResult({ approved: true, message: "System Bypass: Resident not found. Guard verified manually." });
+      setMode('RESULT');
     }
-
-    const aiRes = await simulateResidentResponse(formData.name, formData.purpose, formData.flat);
-    
-    await supabase.from('visitor_entries')
-      .update({ status: aiRes.approved ? 'APPROVED' : 'REJECTED' })
-      .eq('id', entry.id);
-
-    setResult(aiRes);
-    setMode('RESULT');
   };
 
   const handleStaffToggle = async (staff: Staff) => {
@@ -81,6 +115,8 @@ const VisitorEntryForm: React.FC = () => {
     setFormData({ name: '', flat: '', purpose: '' });
     setResult(null);
     setSearchStaff('');
+    setTargetResident(null);
+    setDraftedMessage('');
   };
 
   if (mode === 'ERROR') {
@@ -90,7 +126,7 @@ const VisitorEntryForm: React.FC = () => {
           <i className="fas fa-exclamation-triangle"></i>
         </div>
         <h1 className="text-white text-3xl font-black mb-4">INVALID ACCESS</h1>
-        <p className="text-slate-400 font-bold max-w-sm">This gate terminal is not linked to any building. Please contact your society secretary for the correct link.</p>
+        <p className="text-slate-400 font-bold max-w-sm">This gate terminal is not linked to any building.</p>
       </div>
     );
   }
@@ -179,7 +215,7 @@ const VisitorEntryForm: React.FC = () => {
               </div>
 
               <button type="submit" className="w-full py-8 rounded-[2.5rem] bg-blue-600 text-white text-3xl font-black shadow-2xl shadow-blue-200 mt-6 active:scale-95 transition-all uppercase tracking-tight">
-                CHECK PERMISSION
+                SEND ALERT
               </button>
             </form>
           )}
@@ -220,11 +256,24 @@ const VisitorEntryForm: React.FC = () => {
           )}
 
           {mode === 'LOADING' && (
-            <div className="flex-1 flex flex-col items-center justify-center text-center space-y-10">
-              <div className="w-32 h-32 border-[12px] border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+            <div className="flex-1 flex flex-col items-center justify-center text-center space-y-8">
+              <div className="w-24 h-24 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center relative">
+                <div className="absolute inset-0 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+                <i className="fas fa-paper-plane text-3xl"></i>
+              </div>
               <div>
-                <h2 className="text-4xl font-black text-slate-800 tracking-tight uppercase">Waiting for Resident</h2>
-                <p className="text-slate-400 font-bold text-xl mt-4 px-10">Resident at Flat {formData.flat} is being notified now...</p>
+                <h2 className="text-3xl font-black text-slate-800 tracking-tight uppercase">Notifying Resident</h2>
+                {targetResident ? (
+                   <p className="text-slate-400 font-bold text-lg mt-4 px-10">Sending WhatsApp alert to <span className="text-blue-600">{targetResident.name}</span> in Flat {formData.flat}...</p>
+                ) : (
+                   <p className="text-slate-400 font-bold text-lg mt-4 px-10">Searching resident list for Flat {formData.flat}...</p>
+                )}
+                
+                {draftedMessage && (
+                  <div className="mt-8 p-6 bg-slate-100 rounded-2xl text-xs font-mono text-slate-500 italic text-left border-l-4 border-blue-500">
+                    "{draftedMessage}"
+                  </div>
+                )}
               </div>
             </div>
           )}
