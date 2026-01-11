@@ -1,14 +1,33 @@
 
 import { GoogleGenAI, Type } from "@google/genai";
 
-// Initialize the Google GenAI client with the API key from environment variables.
-// Following @google/genai coding guidelines for initialization.
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+// Helper to safely access environment variables
+const getApiKey = () => {
+  try {
+    // @ts-ignore
+    return (typeof process !== 'undefined' && process.env?.API_KEY) || '';
+  } catch {
+    return '';
+  }
+};
+
+/**
+ * Lazy initialization of the AI client to ensure it doesn't crash 
+ * if process.env is not yet available during the module load.
+ */
+let aiInstance: GoogleGenAI | null = null;
+const getAI = () => {
+  if (!aiInstance) {
+    aiInstance = new GoogleGenAI({ apiKey: getApiKey() });
+  }
+  return aiInstance;
+};
 
 /**
  * Generates a formal society notice based on a provided topic using Gemini 3 Flash.
  */
 export const generateSocietyNotice = async (topic: string) => {
+  const ai = getAI();
   const response = await ai.models.generateContent({
     model: 'gemini-3-flash-preview',
     contents: `Write a formal society notice about: ${topic}. Include Date, Subject, and a professional message. Return as clean Markdown.`,
@@ -17,10 +36,10 @@ export const generateSocietyNotice = async (topic: string) => {
 };
 
 /**
- * Analyzes society security logs and provides a professional summary of trends and risks.
- * Fixed the parameter type from any[] to any to resolve property access errors in calling components (e.g., Reports.tsx).
+ * Analyzes society security logs and provides a professional summary.
  */
 export const analyzeSecurityLog = async (logs: any) => {
+  const ai = getAI();
   const response = await ai.models.generateContent({
     model: 'gemini-3-flash-preview',
     contents: `Analyze these society security logs (visitors and emergencies) and provide a professional 3-paragraph summary of security trends, potential risks, and recommendations: ${JSON.stringify(logs)}`,
@@ -32,6 +51,7 @@ export const analyzeSecurityLog = async (logs: any) => {
  * Simulates a resident's response to a visitor check-in request using a structured JSON schema.
  */
 export const simulateResidentResponse = async (visitorName: string, purpose: string, flat: string) => {
+  const ai = getAI();
   const response = await ai.models.generateContent({
     model: 'gemini-3-flash-preview',
     contents: `Act as a resident in flat ${flat}. A visitor named ${visitorName} is at the gate for: "${purpose}". 
@@ -39,7 +59,6 @@ export const simulateResidentResponse = async (visitorName: string, purpose: str
     Be realistic: Approve standard deliveries and guests, but be skeptical of vague or suspicious purposes.`,
     config: { 
       responseMimeType: "application/json",
-      // Using responseSchema for deterministic JSON output as recommended in the Google GenAI SDK guidelines.
       responseSchema: {
         type: Type.OBJECT,
         properties: {
