@@ -1,0 +1,7 @@
+{
+  "name": "GateBuddy",
+  "description": "A comprehensive society management platform for visitor tracking, delivery logs, staff attendance, and emergency alerts. A venture by Meena technologies.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
